@@ -224,11 +224,25 @@ def main():
             log(f"MILESTONE: enumeration {ing_i}/{len(ACTIVE_INGREDIENTS)} ingredients searched, {len(products)} unique products so far")
         time.sleep(0.4)
 
-    reg_nos = list(products.keys())
-    log(f"MILESTONE: enumeration complete: {len(reg_nos)} unique products queued for detail fetch.")
+    all_reg_nos = list(products.keys())
+
+    # Load already-completed full records so we don't re-hit the server for them
+    final = {}
+    if os.path.exists(DATA_PATH):
+        try:
+            with open(DATA_PATH) as f:
+                existing = json.load(f)
+            for rec in existing.get("products", []):
+                if rec.get("activeIngredients") is not None:
+                    final[rec["id"]] = rec
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    reg_nos = [r for r in all_reg_nos if r not in final]
+    log(f"MILESTONE: enumeration complete: {len(all_reg_nos)} unique products total, "
+        f"{len(final)} already have full detail, {len(reg_nos)} queued for detail fetch.")
 
     # Phase 2: fetch details + download package inserts, with modest concurrency
-    final = {}
     final_lock = threading.Lock()
     done_count = [0]
 
