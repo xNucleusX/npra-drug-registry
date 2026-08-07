@@ -19,8 +19,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from bs4 import BeautifulSoup
 
+import html as html_lib
+
 sys.path.insert(0, os.path.dirname(__file__))
 from ingredients import ACTIVE_INGREDIENTS
+from bigrams import BIGRAMS
 
 BASE = "https://quest3plus.bpfk.gov.my/pmo2/"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -79,6 +82,28 @@ def parse_search_results(html):
             continue
         reg_no = m.group(1).strip()
         product_name = cells[2].get_text(strip=True)
+        out.append((reg_no, product_name))
+    return out
+
+
+ROW_RE = re.compile(
+    r"showDetail\('([^']+)'\)\">[^<]*</a></td>\s*(?:<!--[^>]*-->\s*)?<td align=\"left\">(.*?)</td>\s*<td align=\"left\">",
+    re.DOTALL,
+)
+TAG_RE = re.compile(r"<[^>]*>")
+
+
+def parse_search_results_fast(html):
+    """Regex-based extraction for large result sets (much faster than BeautifulSoup).
+
+    Tolerant of nested tags (e.g. <p>) and stray unescaped '<' inside the
+    product-name cell, both of which occur in the source HTML.
+    """
+    out = []
+    for m in ROW_RE.finditer(html):
+        reg_no = html_lib.unescape(m.group(1)).strip()
+        raw_name = TAG_RE.sub("", m.group(2))
+        product_name = html_lib.unescape(raw_name).strip()
         out.append((reg_no, product_name))
     return out
 
@@ -182,8 +207,10 @@ def download_pdf(reg_no, insert, idx):
 def load_progress():
     if os.path.exists(PROGRESS_PATH):
         with open(PROGRESS_PATH) as f:
-            return json.load(f)
-    return {"products": {}, "ingredients_done": []}
+            data = json.load(f)
+            data.setdefault("bigrams_done", [])
+            return data
+    return {"products": {}, "ingredients_done": [], "bigrams_done": []}
 
 
 def save_progress(progress):
@@ -222,6 +249,31 @@ def main():
         log(f"ingredient={term!r} -> {len(results)} results, {new_count} new, total unique={len(products)}")
         if ing_i % 10 == 0:
             log(f"MILESTONE: enumeration {ing_i}/{len(ACTIVE_INGREDIENTS)} ingredients searched, {len(products)} unique products so far")
+        time.sleep(0.4)
+
+    # Phase 1b: exhaustive enumeration via 2-letter product-name substrings.
+    # The server doesn't enforce the client's 5-char minimum, and this
+    # covers virtually every product regardless of what it's named.
+    bigrams_done = set(progress["bigrams_done"])
+    bg_i = 0
+    for bg in BIGRAMS:
+        bg_i += 1
+        if bg in bigrams_done:
+            continue
+        html = post_search(1, bg, cat=1)
+        results = parse_search_results_fast(html)
+        new_count = 0
+        for reg_no, name in results:
+            if reg_no not in products:
+                products[reg_no] = {"registrationNumber": reg_no, "productName": name}
+                new_count += 1
+        bigrams_done.add(bg)
+        progress["bigrams_done"] = list(bigrams_done)
+        progress["products"] = products
+        save_progress(progress)
+        log(f"bigram={bg!r} -> {len(results)} results, {new_count} new, total unique={len(products)}")
+        if bg_i % 25 == 0:
+            log(f"MILESTONE: bigram enumeration {bg_i}/{len(BIGRAMS)} searched, {len(products)} unique products so far")
         time.sleep(0.4)
 
     all_reg_nos = list(products.keys())
